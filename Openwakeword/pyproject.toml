@@ -1,0 +1,9 @@
+[project]
+name = "voice-activate"
+version = "0.1.0"
+description = "Uses openwakeword to start transfer to chatbot"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "openwakeword>=0.4.0",
+]
