@@ -1,17 +1,3 @@
-// Copyright (c) 2025 by Rockchip Electronics Co., Ltd. All Rights Reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 #include <string.h>
 #include <unistd.h>
 #include <string>
@@ -21,6 +7,7 @@
 #include <vector>
 
 #include "rkllm.h"
+#include "definitions.hpp"
 
 
 using namespace std;
@@ -31,7 +18,6 @@ void exit_handler(int signal)
     if (llmHandle != nullptr)
     {
         {
-            cout << "程序即将退出" << endl;
             LLMHandle _tmp = llmHandle;
             llmHandle = nullptr;
             rkllm_destroy(_tmp);
@@ -49,9 +35,10 @@ int callback(RKLLMResult *result, void *userdata, LLMCallState state)
         printf("\\run error\n");
     } else if (state == RKLLM_RUN_NORMAL) {
         /* ================================================================================================================
-        若使用GET_LAST_HIDDEN_LAYER功能,callback接口会回传内存指针:last_hidden_layer,token数量:num_tokens与隐藏层大小:embd_size
-        通过这三个参数可以取得last_hidden_layer中的数据
-        注:需要在当前callback中获取,若未及时获取,下一次callback会将该指针释放
+        If using GET_LAST_HIDDEN_LAYER functionality, the callback interface will return memory pointer: last_hidden_layer,
+        token count: num_tokens, and hidden layer size: embd_size. Through these three parameters, you can obtain the data
+        in last_hidden_layer. Note: you need to get it in the current callback. If not obtained in time, the next callback
+        will release this pointer.
         ===============================================================================================================*/
         if (result->last_hidden_layer.embd_size != 0 && result->last_hidden_layer.num_tokens != 0) {
             int data_size = result->last_hidden_layer.embd_size * result->last_hidden_layer.num_tokens * sizeof(float);
@@ -80,7 +67,6 @@ int main(int argc, char **argv)
     signal(SIGINT, exit_handler);
     printf("rkllm init start\n");
 
-    //设置参数及初始化
     RKLLMParam param = rkllm_createDefaultParam();
     param.model_path = argv[1];
 
@@ -88,7 +74,7 @@ int main(int argc, char **argv)
     param.extend_param.base_domain_id = 0;
     param.extend_param.embed_flash = 1;
 
-    //设置采样参数
+    // Set sampling parameters
     param.top_k = 1;
     param.top_p = 0.95;
     param.temperature = 0.8;
@@ -96,8 +82,8 @@ int main(int argc, char **argv)
     param.frequency_penalty = 0.0;
     param.presence_penalty = 0.0;
 
-    param.max_new_tokens = std::atoi(argv[2]);
-    param.max_context_len = std::atoi(argv[3]);
+    param.max_new_tokens = MAX_TOKENS;
+    param.max_context_len = MAX_CONTEXT_SIZE;
     param.skip_special_token = true;
     param.extend_param.base_domain_id = 0;
     param.extend_param.embed_flash = 1;
@@ -113,7 +99,7 @@ int main(int argc, char **argv)
     vector<string> pre_input;
     pre_input.push_back("There is a cage with some chickens and rabbits. Counting, there are 14 heads and 38 legs in total. How many chickens and rabbits are there?");
     pre_input.push_back("28 children are arranged in a line. The 10th from the left is Xuedou. What position is he from the right?");
-    cout << "\n**********************可输入以下问题对应序号获取回答/或自定义输入********************\n"
+    cout << "\n**********************You can enter the corresponding number of questions below to get answers / or custom input********************\n"
          << endl;
     for (int i = 0; i < (int)pre_input.size(); i++)
     {
@@ -123,13 +109,13 @@ int main(int argc, char **argv)
          << endl;
 
     RKLLMInput rkllm_input;
-    memset(&rkllm_input, 0, sizeof(RKLLMInput));  // 将所有内容初始化为 0
+    memset(&rkllm_input, 0, sizeof(RKLLMInput));  // Initialize all content to 0
     
-    // 初始化 infer 参数结构体
+    // Initialize infer parameter struct
     RKLLMInferParam rkllm_infer_params;
-    memset(&rkllm_infer_params, 0, sizeof(RKLLMInferParam));  // 将所有内容初始化为 0
+    memset(&rkllm_infer_params, 0, sizeof(RKLLMInferParam));  // Initialize all content to 0
 
-    // 1. 初始化并设置 LoRA 参数（如果需要使用 LoRA）
+    // 1. Initialize and set LoRA parameters (if you need to use LoRA)
     // RKLLMLoraAdapter lora_adapter;
     // memset(&lora_adapter, 0, sizeof(RKLLMLoraAdapter));
     // lora_adapter.lora_adapter_path = "qwen0.5b_fp16_lora.rkllm";
@@ -140,7 +126,7 @@ int main(int argc, char **argv)
     //     printf("\nload lora failed\n");
     // }
 
-    // 加载第二个lora
+    // Load second LoRA
     // lora_adapter.lora_adapter_path = "Qwen2-0.5B-Instruct-all-rank8-F16-LoRA.gguf";
     // lora_adapter.lora_adapter_name = "knowledge_old";
     // lora_adapter.scale = 1.0;
@@ -150,25 +136,25 @@ int main(int argc, char **argv)
     // }
 
     // RKLLMLoraParam lora_params;
-    // lora_params.lora_adapter_name = "test";  // 指定用于推理的 lora 名称
+    // lora_params.lora_adapter_name = "test";  // Specify the LoRA name for inference
     // rkllm_infer_params.lora_params = &lora_params;
 
-    // 2. 初始化并设置 Prompt Cache 参数（如果需要使用 prompt cache）
+    // 2. Initialize and set Prompt Cache parameters (if you need to use prompt cache)
     // RKLLMPromptCacheParam prompt_cache_params;
-    // prompt_cache_params.save_prompt_cache = true;                  // 是否保存 prompt cache
-    // prompt_cache_params.prompt_cache_path = "./prompt_cache.bin";  // 若需要保存prompt cache, 指定 cache 文件路径
+    // prompt_cache_params.save_prompt_cache = true;                  // Whether to save prompt cache
+    // prompt_cache_params.prompt_cache_path = "./prompt_cache.bin";  // If you need to save prompt cache, specify the cache file path
     // rkllm_infer_params.prompt_cache_params = &prompt_cache_params;
     
-    // rkllm_load_prompt_cache(llmHandle, "./prompt_cache.bin"); // 加载缓存的cache
+    // rkllm_load_prompt_cache(llmHandle, "./prompt_cache.bin"); // Load the cached cache
 
     rkllm_infer_params.mode = RKLLM_INFER_GENERATE;
     // By default, the chat operates in single-turn mode (no context retention)
     // 0 means no history is retained, each query is independent
     rkllm_infer_params.keep_history = 0;
 
-    //The model has a built-in chat template by default, which defines how prompts are formatted  
-    //for conversation. Users can modify this template using this function to customize the  
-    //system prompt, prefix, and postfix according to their needs.  
+    // The model has a built-in chat template by default, which defines how prompts are formatted  
+    // for conversation. Users can modify this template using this function to customize the  
+    // system prompt, prefix, and postfix according to their needs.  
     // rkllm_set_chat_template(llmHandle, "", "<｜User｜>", "<｜Assistant｜>");
     
     while (true)
@@ -203,7 +189,7 @@ int main(int argc, char **argv)
         rkllm_input.prompt_input = (char *)input_str.c_str();
         printf("robot: ");
 
-        // 若要使用普通推理功能,则配置rkllm_infer_mode为RKLLM_INFER_GENERATE或不配置参数
+        // To use normal inference functionality, configure rkllm_infer_mode to RKLLM_INFER_GENERATE or do not configure parameters
         rkllm_run(llmHandle, &rkllm_input, &rkllm_infer_params, NULL);
     }
     rkllm_destroy(llmHandle);
