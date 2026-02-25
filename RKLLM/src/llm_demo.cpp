@@ -5,6 +5,10 @@
 #include <iostream>
 #include <csignal>
 #include <vector>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <thread>
+#include <atomic>
 
 #include "rkllm.h"
 #include "definitions.hpp"
@@ -12,6 +16,11 @@
 
 using namespace std;
 LLMHandle llmHandle = nullptr;
+
+typedef struct RequestContext {
+    int client_fd;
+    std::atomic<bool> processing_complete;
+} RequestContext;
 
 void exit_handler(int signal)
 {
@@ -28,11 +37,20 @@ void exit_handler(int signal)
 
 int callback(RKLLMResult *result, void *userdata, LLMCallState state)
 {
+    RequestContext *ctx = (RequestContext *)userdata;
+
     if (state == RKLLM_RUN_FINISH)
     {
         printf("\n");
+        // Mark processing complete but don't close socket yet
+        if (ctx) {
+            ctx->processing_complete = true;
+        }
     } else if (state == RKLLM_RUN_ERROR) {
         printf("\\run error\n");
+        if (ctx) {
+            ctx->processing_complete = true;
+        }
     } else if (state == RKLLM_RUN_NORMAL) {
         /* ================================================================================================================
         If using GET_LAST_HIDDEN_LAYER functionality, the callback interface will return memory pointer: last_hidden_layer,
@@ -53,14 +71,102 @@ int callback(RKLLMResult *result, void *userdata, LLMCallState state)
             }
         }
         printf("%s", result->text);
+
+        // send incremental output back to the client if we have a client fd
+        if (result->text && ctx) {
+            ssize_t sent = send(ctx->client_fd, result->text, strlen(result->text), 0);
+            (void)sent;
+        }
     }
     return 0;
 }
 
+int open_port()
+{
+    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd < 0) {
+        perror("socket creation failed");
+        return 0;
+    }
+
+    int opt = 1;
+    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+        perror("setsockopt failed");
+        close(server_fd);
+        return 0;
+    }
+
+    struct sockaddr_in address;
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = INADDR_ANY;
+    address.sin_port = htons(PORT);
+
+    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+        perror("bind failed");
+        close(server_fd);
+        return 0;
+    }
+
+    if (listen(server_fd, 1) < 0) {
+        perror("listen failed");
+        close(server_fd);
+        return 0;
+    }
+
+    printf("Server listening on port %d\n", PORT);
+    return server_fd;
+}
+
+void accept_input(int server_fd)
+{
+    struct sockaddr_in client_addr;
+    socklen_t client_len = sizeof(client_addr);
+    int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
+    if (client_fd < 0) {
+        perror("accept failed");
+        close(server_fd);
+        return;
+    }
+
+    char buffer[1024] = {0};
+    ssize_t bytes_read = read(client_fd, buffer, sizeof(buffer) - 1);
+    if (bytes_read > 0) {
+        buffer[bytes_read] = '\0';  // Null terminate
+        printf("Received: %s\n", buffer);
+
+        RKLLMInput rkllm_input;
+        memset(&rkllm_input, 0, sizeof(RKLLMInput));  // Initialize all content to 0
+        rkllm_input.input_type = RKLLM_INPUT_PROMPT;
+        rkllm_input.role = "user";
+        rkllm_input.prompt_input = (char *)buffer;
+    
+        RKLLMInferParam rkllm_infer_params;
+        memset(&rkllm_infer_params, 0, sizeof(RKLLMInferParam));  // Initialize all content to 0
+        rkllm_infer_params.mode = RKLLM_INFER_GENERATE;
+        rkllm_infer_params.keep_history = 0;
+
+        // create a small per-request context so the callback can write back
+        RequestContext *ctx = new RequestContext();
+        ctx->client_fd = client_fd;
+        ctx->processing_complete = false;
+
+        rkllm_run(llmHandle, &rkllm_input, &rkllm_infer_params, ctx);
+        
+        // Wait for processing to complete
+        while (!ctx->processing_complete) {
+            usleep(10000);  // Sleep 10ms to avoid busy-waiting
+        }
+        
+        // Now close the socket and cleanup
+        close(client_fd);
+        delete ctx;
+    }
+}
+
 int main(int argc, char **argv)
 {
-    if (argc < 4) {
-        std::cerr << "Usage: " << argv[0] << " model_path max_new_tokens max_context_len\n";
+    if (argc < 2) {
+        std::cerr << "Usage: " << argv[0] << " model_path\n";
         return 1;
     }
 
@@ -97,16 +203,6 @@ int main(int argc, char **argv)
     }
 
     vector<string> pre_input;
-    pre_input.push_back("There is a cage with some chickens and rabbits. Counting, there are 14 heads and 38 legs in total. How many chickens and rabbits are there?");
-    pre_input.push_back("28 children are arranged in a line. The 10th from the left is Xuedou. What position is he from the right?");
-    cout << "\n**********************You can enter the corresponding number of questions below to get answers / or custom input********************\n"
-         << endl;
-    for (int i = 0; i < (int)pre_input.size(); i++)
-    {
-        cout << "[" << i << "] " << pre_input[i] << endl;
-    }
-    cout << "\n*************************************************************************\n"
-         << endl;
 
     RKLLMInput rkllm_input;
     memset(&rkllm_input, 0, sizeof(RKLLMInput));  // Initialize all content to 0
@@ -114,36 +210,6 @@ int main(int argc, char **argv)
     // Initialize infer parameter struct
     RKLLMInferParam rkllm_infer_params;
     memset(&rkllm_infer_params, 0, sizeof(RKLLMInferParam));  // Initialize all content to 0
-
-    // 1. Initialize and set LoRA parameters (if you need to use LoRA)
-    // RKLLMLoraAdapter lora_adapter;
-    // memset(&lora_adapter, 0, sizeof(RKLLMLoraAdapter));
-    // lora_adapter.lora_adapter_path = "qwen0.5b_fp16_lora.rkllm";
-    // lora_adapter.lora_adapter_name = "test";
-    // lora_adapter.scale = 1.0;
-    // ret = rkllm_load_lora(llmHandle, &lora_adapter);
-    // if (ret != 0) {
-    //     printf("\nload lora failed\n");
-    // }
-
-    // Load second LoRA
-    // lora_adapter.lora_adapter_path = "Qwen2-0.5B-Instruct-all-rank8-F16-LoRA.gguf";
-    // lora_adapter.lora_adapter_name = "knowledge_old";
-    // lora_adapter.scale = 1.0;
-    // ret = rkllm_load_lora(llmHandle, &lora_adapter);
-    // if (ret != 0) {
-    //     printf("\nload lora failed\n");
-    // }
-
-    // RKLLMLoraParam lora_params;
-    // lora_params.lora_adapter_name = "test";  // Specify the LoRA name for inference
-    // rkllm_infer_params.lora_params = &lora_params;
-
-    // 2. Initialize and set Prompt Cache parameters (if you need to use prompt cache)
-    // RKLLMPromptCacheParam prompt_cache_params;
-    // prompt_cache_params.save_prompt_cache = true;                  // Whether to save prompt cache
-    // prompt_cache_params.prompt_cache_path = "./prompt_cache.bin";  // If you need to save prompt cache, specify the cache file path
-    // rkllm_infer_params.prompt_cache_params = &prompt_cache_params;
     
     // rkllm_load_prompt_cache(llmHandle, "./prompt_cache.bin"); // Load the cached cache
 
@@ -157,42 +223,14 @@ int main(int argc, char **argv)
     // system prompt, prefix, and postfix according to their needs.  
     // rkllm_set_chat_template(llmHandle, "", "<｜User｜>", "<｜Assistant｜>");
     
-    while (true)
-    {
-        std::string input_str;
-        printf("\n");
-        printf("user: ");
-        std::getline(std::cin, input_str);
-        if (input_str == "exit")
-        {
-            break;
+    int port = open_port();
+    if (port > 0) {
+        while (true) {
+            accept_input(port);
         }
-        if (input_str == "clear")
-        {
-            ret = rkllm_clear_kv_cache(llmHandle, 1, nullptr, nullptr);
-            if (ret != 0)
-            {
-                printf("clear kv cache failed!\n");
-            }
-            continue;
-        }
-        for (int i = 0; i < (int)pre_input.size(); i++)
-        {
-            if (input_str == to_string(i))
-            {
-                input_str = pre_input[i];
-                cout << input_str << endl;
-            }
-        }
-        rkllm_input.input_type = RKLLM_INPUT_PROMPT;
-        rkllm_input.role = "user";
-        rkllm_input.prompt_input = (char *)input_str.c_str();
-        printf("robot: ");
-
-        // To use normal inference functionality, configure rkllm_infer_mode to RKLLM_INFER_GENERATE or do not configure parameters
-        rkllm_run(llmHandle, &rkllm_input, &rkllm_infer_params, NULL);
+    } 
+    else {
+        std::cerr << "Failed to open port\n";
     }
-    rkllm_destroy(llmHandle);
-
     return 0;
 }

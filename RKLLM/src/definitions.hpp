@@ -1,0 +1,4 @@
+#define MAX_TOKENS 2048
+#define MAX_CONTEXT_SIZE 4096
+
+#define PORT 1337
